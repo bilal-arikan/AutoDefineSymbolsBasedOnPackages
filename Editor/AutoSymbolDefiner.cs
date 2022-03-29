@@ -1,31 +1,63 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Linq;
 using UnityEditor;
 using UnityEditor.PackageManager;
 using UnityEditor.PackageManager.Requests;
 using UnityEditor.PackageManager.UI;
 using UnityEngine;
-using UnityEngine.UIElements;
 
 namespace Arikan.Editor
 {
-    [InitializeOnLoad]
-    public class AutoSymbolDefiner : IPackageManagerExtension
+    public class AutoSymbolDefiner
     {
         static ListRequest listRequest;
+        private static bool registeredToCompilationPipeline = false;
+        private static bool isRunningDetectAllPackageSymbols => listRequest != null;
 
-        [InitializeOnLoadMethod]
-        [MenuItem("Tools/AutoSymbolDefiner DefineScripts")]
-        public static void AutoSymbolDefiner_DefineScripts()
+
+        // [UnityEditor.Callbacks.DidReloadScripts]
+        private static void RegisterWithDidReloadScripts()
         {
-            Debug.Log("AutoSymbolDefiner2 Initialized");
-            Events.registeringPackages += OnRegisteredPackages;
-            var list = UnityEditor.PackageManager.Client.List(true, true);
+            if (registeredToCompilationPipeline)
+            {
+                // Debug.Log("RegisterWithDidReloadScripts: Already registered to compilation pipeline");
+                return;
+            }
+            void OnCompilationStarted(object obj)
+            {
+                // Debug.Log("OnCompilationStarted " + obj);
+                DetectAllPackageSymbols();
+            }
+            // Debug.Log("RegisterWithDidReloadScripts");
+            UnityEditor.Compilation.CompilationPipeline.compilationStarted += OnCompilationStarted;
+            registeredToCompilationPipeline = true;
+        }
+        [UnityEditor.InitializeOnLoadMethod]
+        private static void RegisterWithInitializeOnLoadMethod()
+        {
+            DetectAllPackageSymbols();
+            Events.registeringPackages += OnRegisteringPackages;
+        }
+
+        [MenuItem("Tools/AutoSymbolDefiner/Detect All Defines")]
+        public static void DetectAllPackageSymbols()
+        {
+            if (isRunningDetectAllPackageSymbols)
+            {
+                Debug.Log("DetectAllPackageSymbols: already running");
+                return;
+            }
+            // Debug.Log("DetectAllPackageSymbols");
+            // Events.registeringPackages += OnRegisteredPackages;
+            listRequest = UnityEditor.PackageManager.Client.List(true, true);
             EditorApplication.update += AutoSymbolDefinerProgress;
         }
+
         static void AutoSymbolDefinerProgress()
         {
+            // Debug.Log("AutoSymbolDefinerProgress");
             if (listRequest != null && listRequest.IsCompleted)
             {
                 EditorApplication.update -= AutoSymbolDefinerProgress;
@@ -36,97 +68,77 @@ namespace Arikan.Editor
                     return;
                 }
 
-                var list = listRequest.Result;
-                foreach (var pck in list)
+                DefineAllSymbols(listRequest.Result);
+
+                // Debug.Log("AutoSymbolDefinerProgress Completed");
+                listRequest = null;
+            }
+        }
+
+        private static void OnRegisteringPackages(PackageRegistrationEventArgs obj)
+        {
+            // Debug.Log("Registered packages changed : " + obj.added.Count + " added, " + obj.removed.Count + " removed");
+            AddSymbol(obj.added.ToArray());
+            RemoveSymbol(obj.removed.ToArray());
+        }
+
+        public static bool AddSymbol(params UnityEditor.PackageManager.PackageInfo[] packages)
+        {
+            var defaultSymbols = PlayerSettings.GetScriptingDefineSymbolsForGroup(EditorUserBuildSettings.selectedBuildTargetGroup);
+            var symbols = defaultSymbols;
+            foreach (var package in packages)
+            {
+                var symbol = package.name.Replace(".", "_").Replace("-", "_").ToUpper(new System.Globalization.CultureInfo("en-US", false));
+                if (!symbols.Contains(symbol))
                 {
-                    var direct = pck.isDirectDependency && pck.source
-                            != PackageSource.BuiltIn && pck.source
-                            != PackageSource.Embedded;
-                    if (direct)
-                    {
-                        Debug.Log("Package Adding: " + pck.name);
-                        AddSymbol(pck);
-                    }
-                    else
-                    {
-                        Debug.Log("Package Skipping: " + pck.name);
-                    }
+                    symbols += ";" + symbol;
                 }
-
-                Debug.Log("AutoSymbolDefiner2 Completed");
             }
-            listRequest = null;
-        }
-
-        // [UnityEditor.Callbacks.DidReloadScripts]
-        [InitializeOnLoadMethod]
-        private static void OnScriptsReloaded()
-        {
-            Debug.Log("AutoSymbolDefiner Initialized 1");
-            Events.registeringPackages += OnRegisteredPackages;
-            Debug.Log("AutoSymbolDefiner Initialized 2");
-            PackageManagerExtensions.RegisterExtension(new AutoSymbolDefiner());
-
-        }
-
-        private static void OnRegisteredPackages(PackageRegistrationEventArgs obj)
-        {
-            Debug.Log("Registered packages changed : " + obj.added.Count + " added, " + obj.removed.Count + " removed");
-            foreach (var item in obj.added)
+            if (symbols != defaultSymbols)
             {
-                AddSymbol(item);
-            }
-            foreach (var item in obj.removed)
-            {
-                RemoveSymbol(item);
-            }
-        }
-
-        public static void AddSymbol(UnityEditor.PackageManager.PackageInfo package)
-        {
-            var symbol = package.packageId.Replace(".", "_");
-
-            var symbols = PlayerSettings.GetScriptingDefineSymbolsForGroup(EditorUserBuildSettings.selectedBuildTargetGroup);
-            if (!symbols.Contains(symbol))
-            {
-                symbols += ";" + symbol;
                 PlayerSettings.SetScriptingDefineSymbolsForGroup(EditorUserBuildSettings.selectedBuildTargetGroup, symbols);
+                return true;
             }
+            return false;
         }
 
-        public static void RemoveSymbol(UnityEditor.PackageManager.PackageInfo package)
+        public static bool RemoveSymbol(params UnityEditor.PackageManager.PackageInfo[] packages)
         {
-            var symbol = package.packageId.Replace(".", "_");
-
-            var symbols = PlayerSettings.GetScriptingDefineSymbolsForGroup(EditorUserBuildSettings.selectedBuildTargetGroup);
-            if (symbols.Contains(symbol))
+            var defaultSymbols = PlayerSettings.GetScriptingDefineSymbolsForGroup(EditorUserBuildSettings.selectedBuildTargetGroup);
+            var symbols = defaultSymbols;
+            foreach (var package in packages)
             {
-                symbols = symbols.Replace(symbol, "");
-                PlayerSettings.SetScriptingDefineSymbolsForGroup(EditorUserBuildSettings.selectedBuildTargetGroup, symbols);
+                var symbol = package.name.Replace(".", "_").Replace("-", "_").ToUpper(new System.Globalization.CultureInfo("en-US", false));
+                if (symbols.Contains(symbol))
+                {
+                    symbols = symbols.Replace(symbol, "");
+                }
             }
+            if (symbols != defaultSymbols)
+            {
+                PlayerSettings.SetScriptingDefineSymbolsForGroup(EditorUserBuildSettings.selectedBuildTargetGroup, symbols);
+                return true;
+            }
+            return false;
         }
 
-        public VisualElement CreateExtensionUI()
+        public static void DefineAllSymbols(PackageCollection coll)
         {
-            Debug.Log("CreateExtensionUI");
-            return null;
-        }
-
-        public void OnPackageSelectionChange(UnityEditor.PackageManager.PackageInfo packageInfo)
-        {
-            Debug.Log("Package selected : " + packageInfo.name);
-        }
-
-        public void OnPackageAddedOrUpdated(UnityEditor.PackageManager.PackageInfo packageInfo)
-        {
-            Debug.Log("Package added or updated : " + packageInfo.name);
-            AddSymbol(packageInfo);
-        }
-
-        public void OnPackageRemoved(UnityEditor.PackageManager.PackageInfo packageInfo)
-        {
-            Debug.Log("Package removed : " + packageInfo.name);
-            RemoveSymbol(packageInfo);
+            foreach (var pck in coll)
+            {
+                var direct = pck.source
+                        != PackageSource.BuiltIn && pck.source
+                        != PackageSource.Embedded;
+                if (direct)
+                {
+                    // // Debug.Log("Package Adding: " + pck.name);
+                    AddSymbol(pck);
+                }
+                else
+                {
+                    // // Debug.Log("Package Skipping: " + pck.name);
+                }
+            }
         }
     }
 
